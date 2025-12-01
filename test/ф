@@ -1,0 +1,62 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <curl/curl.h>
+#include <string.h>
+
+int progress_callback(void *clientp,
+curl_off_t dltotal, curl_off_t dlnow,
+curl_off_t ultotal, curl_off_t ulnow)
+{
+int id = *(int*)clientp;
+if (dltotal > 0) {
+double percent = (double)dlnow / (double)dltotal * 100.0;
+printf("\rClient %d: %.2f%%", id, percent);
+fflush(stdout);
+}
+return 0;
+}
+
+int main(int argc, char *argv[])
+{
+if (argc < 2) {
+fprintf(stderr, "Usage: %s <client_id>\n", argv[0]);
+return 1;
+}
+
+int client_id = atoi(argv[1]);
+char outfile[64];
+snprintf(outfile, sizeof(outfile), "client%d.zip", client_id);
+
+curl_global_init(CURL_GLOBAL_ALL);
+CURL *curl = curl_easy_init();
+if (!curl) return 1;
+
+FILE *fp = fopen(outfile, "wb");
+if (!fp) {
+    fprintf(stderr, "Cannot open file %s\n", outfile);
+    curl_easy_cleanup(curl);
+    return 1;
+}
+
+curl_easy_setopt(curl, CURLOPT_URL, "http://xcal1.vodafone.co.uk/1GB.zip");
+curl_easy_setopt(curl, CURLOPT_PROXY, "http://localhost:8080");
+curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+
+curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &client_id);
+
+CURLcode res = curl_easy_perform(curl);
+if (res != CURLE_OK) {
+    fprintf(stderr, "\nClient %d error: %s\n", client_id, curl_easy_strerror(res));
+}
+
+fclose(fp);
+curl_easy_cleanup(curl);
+curl_global_cleanup();
+
+printf("\nClient %d download complete.\n", client_id);
+return 0;
+
+
+}
