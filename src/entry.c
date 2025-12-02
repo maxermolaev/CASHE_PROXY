@@ -22,6 +22,7 @@ cache_entry_t *cache_entry_create(const char *request, size_t request_len, const
     pthread_mutex_init(&entry->mutex, NULL);
     pthread_cond_init(&entry->ready_cond, NULL);
     entry->deleted = 0;
+    entry->finished = 0;
 
     return entry;
 }

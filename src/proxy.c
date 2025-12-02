@@ -23,7 +23,7 @@
 #define TASK_QUEUE_CAPACITY     100
 #define MAX_USERS_COUNT         10
 #define ACCEPT_TIMEOUT_MS       1000
-#define READ_WRITE_TIMEOUT_MS   10000
+#define READ_WRITE_TIMEOUT_MS   60000
 
 #define SUCCESS             0
 #define ERROR               (-1)
@@ -37,13 +37,13 @@ static int accept_client(int server_socket);
 static void handle_client(void *arg);
 static int connect_to_remote(const char *host, int port);
 
-static ssize_t receive_with_timeout(int fd, char **data, size_t data_len);
+static ssize_t receive_with_timeout(int fd, char *buf, size_t buf_len);
 static ssize_t send_with_timeout(int fd, const char *data, size_t data_len);
 static ssize_t receive_full_data(int fd, char **data);
 static ssize_t send_full_data(int fd, const char *data, size_t data_len);
-static ssize_t send_message(int fd, const message_t *message);
 static ssize_t receive_and_send_data(int ifd, int ofd, char **data);
 static ssize_t receive_and_send_message(int ifd, int ofd, message_t **message);
+static ssize_t stream_cache_to_client(cache_entry_t *entry, int client_socket);
 
 static int get_host_port(const char *host_port, char *host, int *port);
 static int parse_request(const char *request, size_t request_len, const char **method, size_t *method_len, const char **host, size_t *host_len);
@@ -252,9 +252,9 @@ static void handle_client(void *arg) {
 
         entry = find_cache_entry(ctx->proxy->cache, request, request_len);
         if (entry != NULL) {
-            log("Cache hit");
-            send_message(ctx->client_socket, entry->response);
             pthread_mutex_unlock(&ctx->proxy->cache_mutex);
+            log("Cache hit, start streaming from cache");
+            stream_cache_to_client(entry, ctx->client_socket);
             goto destroy_ctx;
         }
 
@@ -303,6 +303,13 @@ static void handle_client(void *arg) {
     message_t *response = NULL;
     message_add_part(&response, response_data, response_data_len);
 
+    if (check_request(method, method_len)) {
+        entry->response = response;
+        pthread_mutex_lock(&entry->mutex);
+        pthread_cond_broadcast(&entry->ready_cond);
+        pthread_mutex_unlock(&entry->mutex);
+    }
+
     while (content_len < content_length_header) {
         response_data_len = receive_and_send_message(remote_socket, ctx->client_socket, &response);
         if (response_data_len == ERROR) {
@@ -310,12 +317,21 @@ static void handle_client(void *arg) {
             goto destroy_entry;
         }
         content_len += response_data_len;
+
+        if (check_request(method, method_len)) {
+            pthread_mutex_lock(&entry->mutex);
+            pthread_cond_broadcast(&entry->ready_cond);
+            pthread_mutex_unlock(&entry->mutex);
+        }
     }
 
     if (!check_response(status)) goto destroy_entry;
     if (check_request(method, method_len)) {
+        entry->finished = 1;
         entry->response = response;
+        pthread_mutex_lock(&entry->mutex);
         pthread_cond_broadcast(&entry->ready_cond);
+        pthread_mutex_unlock(&entry->mutex);
         log("Set response to entry");
     }
 
@@ -367,32 +383,36 @@ static int connect_to_remote(const char *host, int port) {
     return remote_socket;
 }
 
-static ssize_t receive_with_timeout(int fd, char **data, size_t data_len) {
+static ssize_t receive_with_timeout(int fd, char *buf, size_t buf_len) {
     fd_set read_fds;
     FD_ZERO(&read_fds);
     FD_SET(fd, &read_fds);
 
     struct timeval timeout;
-    timeout.tv_sec = READ_WRITE_TIMEOUT_MS / 1000;
+    timeout.tv_sec  = READ_WRITE_TIMEOUT_MS / 1000;
     timeout.tv_usec = (READ_WRITE_TIMEOUT_MS % 1000) * 1000;
 
     int ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
     if (ready == -1) {
-        if (errno != EINTR) log("Data receiving error: %s", strerror(errno));
+        if (errno != EINTR) {
+            log("Data receiving error: %s", strerror(errno));
+        }
         return ERROR;
-    } else if (ready == 0) {
+    }
+    if (ready == 0) {
         log("Data receiving error: timeout");
         return ERROR;
     }
 
-    ssize_t received_bytes = recv(fd, data, data_len, 0);
+    ssize_t received_bytes = recv(fd, buf, buf_len, 0);
     if (received_bytes < 0) {
         log("Data receiving error: %s", strerror(errno));
         return ERROR;
     }
-    log("Received: %s", data);
+
     return received_bytes;
 }
+
 
 static ssize_t send_with_timeout(int fd, const char *data, size_t data_len) {
     fd_set write_fds;
@@ -428,7 +448,7 @@ static ssize_t receive_full_data(int fd, char **data) {
     char buf[BUFFER_SIZE + 1];
     while (1) {
         memset(buf, 0, BUFFER_SIZE);
-        ssize_t received_bytes = receive_with_timeout(fd, (char **) &buf, BUFFER_SIZE);
+        ssize_t received_bytes = receive_with_timeout(fd, buf, BUFFER_SIZE);
         if (received_bytes == ERROR) return ERROR;
         if (received_bytes == 0) break;
 
@@ -464,25 +484,12 @@ static ssize_t send_full_data(int fd, const char *data, size_t data_len) {
     return all_sent_bytes;
 }
 
-static ssize_t send_message(int fd, const message_t *message) {
-    message_t *curr = (message_t *) message;
-    ssize_t all_sent_bytes = 0;
-    while (curr != NULL) {
-        ssize_t sent_bytes = send_full_data(fd, curr->part, curr->part_len);
-        if (sent_bytes == ERROR) return ERROR;
-        all_sent_bytes += sent_bytes;
-        curr = curr->next;
-    }
-
-    return all_sent_bytes;
-}
-
 static ssize_t receive_and_send_data(int ifd, int ofd, char **data) {
     char buf[BUFFER_SIZE + 1];
     ssize_t all_received_bytes = 0;
     while (1) {
         memset(buf, 0, BUFFER_SIZE);
-        ssize_t received_bytes = receive_with_timeout(ifd, (char **) &buf, BUFFER_SIZE);
+        ssize_t received_bytes = receive_with_timeout(ifd, buf, BUFFER_SIZE);
         if (received_bytes == ERROR) return ERROR;
         if (received_bytes == 0) break;
 
@@ -529,6 +536,48 @@ static ssize_t receive_and_send_message(int ifd, int ofd, message_t **message) {
     return all_sent_bytes;
 }
 
+static ssize_t stream_cache_to_client(cache_entry_t *entry, int client_socket) {
+    if (entry == NULL) return ERROR;
+
+    ssize_t total_sent = 0;
+
+    pthread_mutex_lock(&entry->mutex);
+    message_t *curr = entry->response;
+    message_t *last_sent = NULL;
+
+    while (1) {
+        while (curr != NULL) {
+            message_t *to_send = curr;
+
+            pthread_mutex_unlock(&entry->mutex);
+            ssize_t sent = send_full_data(client_socket, to_send->part, to_send->part_len);
+            if (sent == ERROR) {
+                return ERROR;
+            }
+            total_sent += sent;
+
+            pthread_mutex_lock(&entry->mutex);
+            last_sent = to_send;
+            curr = curr->next;
+        }
+
+        if (entry->deleted || entry->finished) {
+            pthread_mutex_unlock(&entry->mutex);
+            break;
+        }
+
+        pthread_cond_wait(&entry->ready_cond, &entry->mutex);
+
+        if (last_sent == NULL) {
+            curr = entry->response;
+        } else {
+            curr = last_sent->next;
+        }
+    }
+
+    return total_sent;
+}
+
 static int get_host_port(const char *host_port, char *host, int *port) {
     regex_t regex = {};
     char *pattern = "^(http|https)?(://)?([^:/]+)(:([0-9]+))?";
@@ -539,7 +588,6 @@ static int get_host_port(const char *host_port, char *host, int *port) {
         log("Host and port getting error: failed to regex pattern compilation");
         return ERROR;
     }
-
     ret = regexec(&regex, host_port, 6, match, 0);
     if (ret == 0) {
         int host_start = match[3].rm_so;

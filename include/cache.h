@@ -11,6 +11,7 @@ struct cache_entry_t {
     size_t request_len;
 
     message_t *response;
+    atomic_int finished;
 
     pthread_mutex_t mutex;
     pthread_cond_t ready_cond;
