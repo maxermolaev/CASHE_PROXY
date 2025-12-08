@@ -520,7 +520,7 @@ static ssize_t receive_and_send_message(int ifd, int ofd, message_t **message) {
     ssize_t all_sent_bytes = 0;
     while (1) {
         memset(buf, 0, BUFFER_SIZE);
-        ssize_t received_bytes = receive_with_timeout(ifd, (char **) &buf, BUFFER_SIZE);
+        ssize_t received_bytes = receive_with_timeout(ifd, buf, BUFFER_SIZE);
         if (received_bytes == ERROR) return ERROR;
         if (received_bytes == 0) break;
 
@@ -718,7 +718,7 @@ static int check_request(const char *method, size_t method_len) {
 }
 
 static int check_response(int status) {
-    return status < 400;
+    return status == 200;
 }
 
 static cache_entry_t *find_cache_entry(cache_t *cache, const char *request, size_t request_len) {
