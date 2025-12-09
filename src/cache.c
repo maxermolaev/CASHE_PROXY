@@ -160,7 +160,18 @@ void cache_destroy(cache_t *cache) {
     }
 
     cache->garbage_collector_running = 0;
-    pthread_join(cache->garbage_collector, NULL);
+
+    const int max_wait_sec = 5;
+    int waited = 0;
+
+    while (waited < max_wait_sec) {
+        if (pthread_kill(cache->garbage_collector, 0) != 0) {
+            break;
+        }
+        sleep(1);
+        waited++;
+    }
+    pthread_detach(cache->garbage_collector);
 
     for (int i = 0; i < cache->capacity; i++) {
         cache_node_t *curr = cache->array[i];

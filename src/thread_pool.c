@@ -1,5 +1,7 @@
 #include "thread_pool.h"
 
+#include <unistd.h>
+#include <signal.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -117,12 +119,25 @@ void thread_pool_execute(thread_pool_t *pool, routine_t routine, void *arg) {
 }
 
 void thread_pool_shutdown(thread_pool_t *pool) {
+    if (!pool) return;
+
     pool->shutdown = 1;
 
     pthread_cond_broadcast(&pool->not_empty_cond);
     pthread_cond_broadcast(&pool->not_full_cond);
 
-    for (int i = 0; i < pool->num_executors; i++) pthread_join(pool->executors[i], NULL);
+    for (int i = 0; i < pool->num_executors; i++) {
+        int waited = 0;
+        const int max_wait_sec = 5;
+        while (waited < max_wait_sec) {
+            if (pthread_kill(pool->executors[i], 0) != 0) {
+                break;
+            }
+            sleep(1);
+            waited++;
+        }
+        pthread_detach(pool->executors[i]);
+    }
 
     free(pool->tasks);
     free(pool->executors);
@@ -134,7 +149,14 @@ void thread_pool_shutdown(thread_pool_t *pool) {
     free(pool);
 }
 
+
 static void *executor_routine(void *arg) {
+    sigset_t mask;
+    sigfillset(&mask);
+    if (pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0) {
+        log("Failed to block signals in worker");
+        pthread_exit(NULL);
+    }
     thread_pool_t *pool = (thread_pool_t *) arg;
     while (1) {
         pthread_mutex_lock(&pool->mutex);
