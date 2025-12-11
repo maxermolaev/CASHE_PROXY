@@ -228,42 +228,48 @@ static void *garbage_collector_routine(void *arg) {
         log("Cache garbage collector error: cache is NULL");
         pthread_exit(NULL);
     }
-    cache_t *cache = (cache_t *) arg;
+    cache_t *cache = arg;
     log("Cache garbage collector start");
 
     struct timeval curr_time;
-    while (cache->garbage_collector_running) {
+    while (&cache->garbage_collector_running) {
         usleep(MIN(1000 * cache->entry_expired_time_ms / 2, 1000000));
-        //log("Garbage collector running");
+        log("GC running");
 
-        gettimeofday(&curr_time, 0);
+        gettimeofday(&curr_time, NULL);
         for (int i = 0; i < cache->capacity; i++) {
             cache_node_t *curr = cache->array[i];
 
             if (curr == NULL) continue;
 
-            pthread_rwlock_rdlock(&curr->rwlock);
+            pthread_rwlock_wrlock(&curr->rwlock);
 
+            cache_node_t *node = curr;
             cache_node_t *next = NULL;
-            while (curr != NULL) {
-                time_t diff = (curr_time.tv_sec - curr->last_modified_time.tv_sec) * 1000 +
-                        (curr_time.tv_usec - curr->last_modified_time.tv_usec) / 1000;
+            cache_node_t *prev = NULL;
+
+            while (node != NULL) {
+                time_t diff = (curr_time.tv_sec - node->last_modified_time.tv_sec) * 1000 +
+                              (curr_time.tv_usec - node->last_modified_time.tv_usec) / 1000;
+
+                next = node->next;
+
                 if (diff >= cache->entry_expired_time_ms) {
-                    pthread_rwlock_rdlock(&curr->rwlock);
-                    next = curr->next;
-                    char *request = curr->entry->request;
-                    size_t request_len = curr->entry->request_len;
-                    pthread_rwlock_unlock(&curr->rwlock);
+                    log("GC remove: %s", node->entry->request);
 
-                    cache_delete(cache, request, request_len);
+                    if (prev == NULL) {
+                        cache->array[i] = next;
+                    } else {
+                        prev->next = next;
+                    }
+                    cache_node_destroy(node);
                 } else {
-                    pthread_rwlock_rdlock(&curr->rwlock);
-                    next = curr->next;
-                    pthread_rwlock_unlock(&curr->rwlock);
+                    prev = node;
                 }
-
-                curr = next;
+                node = next;
             }
+
+            pthread_rwlock_unlock(&curr->rwlock);
         }
     }
 

@@ -11,6 +11,8 @@
 
 #include "log.h"
 
+#define THREAD_NAME_SIZE 16
+
 static long id_counter = 0;
 
 static void *executor_routine(void *arg);
@@ -81,11 +83,11 @@ thread_pool_t * thread_pool_create(int executor_count, int task_queue_capacity) 
         return NULL;
     }
 
-    char thread_name[16];
+    char thread_name[THREAD_NAME_SIZE];
     for (int i = 0; i < executor_count; i++) {
         pthread_create(&pool->executors[i], NULL, executor_routine, pool);
 
-        snprintf(thread_name, 16, "thread-pool-%d", i);
+        snprintf(thread_name, THREAD_NAME_SIZE, "thread-pool-%d", i);
         pthread_setname_np(thread_name);
     }
 

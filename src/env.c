@@ -37,8 +37,6 @@ time_t env_get_cache_expired_time_ms() {
         log("CACHE_PROXY_CACHE_EXPIRED_TIME_MS getting error: variable not set");
         return CACHE_EXPIRED_TIME_MS_DEFAULT;
     }
-
-    // Convert string to time_t
     errno = 0;
     char *end;
     time_t cache_expired_time_ms = strtol(cache_expired_time_ms_env, &end, 0);
